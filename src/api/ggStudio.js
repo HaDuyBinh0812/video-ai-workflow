@@ -3,7 +3,7 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 const API_KEY = import.meta.env.VITE_GEMINI_API_KEY;
 
 if (API_KEY) {
-    console.log("[Gemini] API key loaded:", API_KEY.slice(0, 8) + "...");
+    console.log("[Gemini] API key loaded:" + "...");
 } else {
     console.warn(
         "[Gemini] No API key found (VITE_GEMINI_API_KEY). Using mock data.",

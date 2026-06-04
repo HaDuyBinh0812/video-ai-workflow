@@ -53,6 +53,7 @@ export const defaultNodes = [
 export const defaultEdges = [
   { id: 'e1-4', source: '1', target: '4', animated: false, style: { stroke: '#7c3aed55', strokeWidth: 1.5 } },
   { id: 'e2-4', source: '2', target: '4', animated: false, style: { stroke: '#7c3aed55', strokeWidth: 1.5 } },
+  { id: 'e3-4', source: '3', target: '4', animated: false, style: { stroke: '#7c3aed55', strokeWidth: 1.5 } },
   { id: 'e3-5', source: '3', target: '5', animated: false, style: { stroke: '#7c3aed55', strokeWidth: 1.5 } },
   { id: 'e4-5', source: '4', target: '5', animated: false, style: { stroke: '#7c3aed55', strokeWidth: 1.5 } },
   { id: 'e5-6', source: '5', target: '6', animated: false, style: { stroke: '#7c3aed55', strokeWidth: 1.5 } },

@@ -81,11 +81,53 @@ export function autoLayout(nodes, edges) {
   })
 }
 
+const REQUIRED_OUTPUTS = {
+  promptNode:      ['generatedPrompts'],
+  scriptNode:      ['script'],
+  storyboardNode:  ['storyboard'],
+  videoPromptNode: ['videoPrompt'],
+  negativeNode:    ['negativePrompt'],
+}
+
+function validateOutput(nodeType, result) {
+  const missing = (REQUIRED_OUTPUTS[nodeType] || []).filter(k => result[k] == null)
+  if (missing.length) throw new Error(`${nodeType}: missing required output — ${missing.join(', ')}`)
+}
+
+// Fields where multiple connected nodes should combine their values.
+// Everything else uses last-wins so enum/config fields stay valid.
+const CONCAT_KEYS = new Set(['textInput', 'imageDescription'])
+
+// Merge upstream outputs with type-aware conflict resolution:
+//   CONCAT_KEYS (content fields): concatenate distinct strings with \n
+//   All other keys: last-wins (prevents e.g. "9:16\n16:9" for aspectRatio)
+export function mergeUpstream(upstreamOutputs) {
+  const merged = {}
+  for (const out of upstreamOutputs) {
+    if (!out) continue
+    for (const [key, val] of Object.entries(out)) {
+      if (!(key in merged)) {
+        merged[key] = val
+      } else if (
+        CONCAT_KEYS.has(key) &&
+        typeof merged[key] === 'string' &&
+        typeof val === 'string' &&
+        merged[key] !== val
+      ) {
+        merged[key] = merged[key] + '\n' + val
+      } else {
+        merged[key] = val  // last-wins for all non-concat keys
+      }
+    }
+  }
+  return merged
+}
+
 // Process a single node given upstream outputs merged into inputs.
-// Each node returns { ...merged, ownOutput } so accumulated data flows through chains.
-// Example: TextInput→Prompt→Script — Script sees textInput AND generatedPrompts.
+// node.data = ONLY the node's own config. merged = ONLY accumulated upstream outputs.
+// Explicit API contracts prevent upstream data from leaking into unconnected nodes.
 export async function processNode(node, upstreamOutputs) {
-  const merged = upstreamOutputs.reduce((acc, out) => ({ ...acc, ...(out || {}) }), {})
+  const merged = mergeUpstream(upstreamOutputs)
   const data = node.data || {}
 
   switch (node.type) {
@@ -95,7 +137,7 @@ export async function processNode(node, upstreamOutputs) {
           const analysis = await analyzeImage(data.imageBase64, data.imageMimeType || 'image/jpeg')
           return { ...merged, imageAnalysis: analysis, imageType: data.imageType || 'general', imageDescription: data.description || '' }
         } catch {
-          return { ...merged, imageDescription: data.description || '', imageType: data.imageType || 'general' }
+          return { ...merged, imageDescription: data.description || '', imageType: data.imageType || 'general', _imageMocked: true }
         }
       }
       return { ...merged, imageDescription: data.description || '', imageType: data.imageType || 'general' }
@@ -124,47 +166,72 @@ export async function processNode(node, upstreamOutputs) {
 
     case 'promptNode': {
       const res = await generatePrompts({
-        ...merged,
-        promptType: data.promptType || 'image',
-        detailLevel: data.detailLevel || 'detailed',
-        additionalRequirements: data.additionalRequirements || ''
+        imageAnalysis:          merged.imageAnalysis,
+        imageDescription:       merged.imageDescription,
+        textInput:              merged.textInput,
+        style:                  merged.style,
+        promptType:             data.promptType || 'image',
+        detailLevel:            data.detailLevel || 'detailed',
+        additionalRequirements: data.additionalRequirements || '',
       })
-      return { ...merged, generatedPrompts: res }
+      validateOutput('promptNode', { generatedPrompts: res })
+      // textInput is consumed here — don't forward it downstream.
+      // Nodes after PromptNode should use generatedPrompts, not raw textInput.
+      const { textInput: _consumed, ...forwardedMerged } = merged
+      return { ...forwardedMerged, generatedPrompts: res }
     }
 
     case 'scriptNode': {
       const res = await generateScript({
-        ...merged,
-        videoStyle: data.videoStyle || 'tvc',
-        sceneCount: Number(data.sceneCount) || 6,
-        duration: Number(data.duration || merged.duration) || 30,
-        language: data.language || merged.language || 'vietnamese',
-        includeDialogue: data.includeDialogue !== false
+        imageAnalysis:    merged.imageAnalysis,
+        imageDescription: merged.imageDescription,
+        textInput:        merged.textInput,
+        generatedPrompts: merged.generatedPrompts,
+        style:            merged.style,
+        videoStyle:       data.videoStyle || 'tvc',
+        sceneCount:       Number(data.sceneCount) || 6,
+        duration:         Number(merged.duration || data.duration) || 30,
+        language:         merged.language || data.language || 'vietnamese',
+        includeDialogue:  data.includeDialogue !== false,
       })
-      return { ...merged, script: res }
+      validateOutput('scriptNode', { script: res })
+      // textInput consumed — downstream nodes (storyboard, videoPrompt) don't need raw text.
+      const { textInput: _consumed, ...forwardedMerged } = merged
+      return { ...forwardedMerged, script: res, videoStyle: data.videoStyle || 'tvc' }
     }
 
     case 'storyboardNode': {
       const res = await generateStoryboard({
-        ...merged,
-        panelCount: Number(data.panelCount) || 6,
-        aspectRatio: data.aspectRatio || merged.aspectRatio || '9:16'
+        script:      merged.script,
+        panelCount:  Number(data.panelCount) || 6,
+        aspectRatio: merged.aspectRatio || data.aspectRatio || '9:16',
       })
+      validateOutput('storyboardNode', { storyboard: res })
       return { ...merged, storyboard: res }
     }
 
     case 'videoPromptNode': {
       const res = await generateVideoPrompt({
-        ...merged,
-        mode: data.mode || 'imageToVideo',
-        cameraMovement: data.cameraMovement || merged.cameraStyle || 'slow-push',
-        motionStyle: data.motionStyle || merged.motionStyle || 'natural'
+        script:          merged.script,
+        storyboard:      merged.storyboard,
+        generatedPrompts:merged.generatedPrompts,
+        imageAnalysis:   merged.imageAnalysis,
+        mode:            data.mode || 'imageToVideo',
+        cameraMovement:  merged.cameraStyle || data.cameraMovement || 'slow-push',
+        motionStyle:     merged.motionStyle || data.motionStyle || 'natural',
       })
+      validateOutput('videoPromptNode', { videoPrompt: res })
       return { ...merged, videoPrompt: res }
     }
 
     case 'negativeNode': {
-      const res = await generateNegativePrompt(merged)
+      const res = await generateNegativePrompt({
+        imageAnalysis:    merged.imageAnalysis,
+        script:           merged.script,
+        generatedPrompts: merged.generatedPrompts,
+        videoStyle:       merged.videoStyle,
+      })
+      validateOutput('negativeNode', { negativePrompt: res })
       return { ...merged, negativePrompt: res }
     }
 
